@@ -1,6 +1,7 @@
 import numpy
 
 import chainer
+from chainer import _ideep
 from chainer import configuration
 from chainer import cuda
 from chainer import function_node
@@ -8,6 +9,7 @@ import chainer.functions
 from chainer.utils import argument
 from chainer.utils import conv
 from chainer.utils import type_check
+
 
 if cuda.cudnn_enabled:
     cudnn = cuda.cudnn
@@ -57,6 +59,8 @@ def _get_algorithm_bwd_filter(
 
 
 class Convolution2DFunction(function_node.FunctionNode):
+
+    ideep_hint = None
 
     def __init__(self, stride=1, pad=0, cover_all=False, **kwargs):
         argument.check_unexpected_kwargs(
@@ -113,8 +117,14 @@ class Convolution2DFunction(function_node.FunctionNode):
         return out_h, out_w
 
     def forward_cpu(self, inputs):
-        self.retain_inputs((0, 1))  # retain only x and W
+        if (all(_.dtype == numpy.float32 for _ in inputs)
+                and (self.dy == 1 and self.dx == 1)
+                and _ideep.should_use_ideep('>=auto')):
 
+            # iDeep implementation
+            return self.forward_ideep(inputs)
+
+        self.retain_inputs((0, 1))  # retain only x and W
         if len(inputs) == 2:
             (x, W), b = inputs, None
         else:
@@ -129,6 +139,17 @@ class Convolution2DFunction(function_node.FunctionNode):
         if b is not None:
             y += b
         return numpy.rollaxis(y, 3, 1),
+
+    def forward_ideep(self, inputs):
+        self.retain_inputs((0, 1))
+
+        cc = _ideep.ideep.xnn.ConvolutionForward(
+            inputs, stride=(self.sy, self.sx),
+            pad=(self.ph, self.pw), cover_all=self.cover_all)
+        self.ideep_hint = cc.hint
+
+        y, = cc.execute_on()
+        return y,
 
     def forward_gpu(self, inputs):
         self.retain_inputs((0, 1))  # retain only x and W
@@ -302,8 +323,12 @@ class Convolution2DGradW(function_node.FunctionNode):
         self.dx = conv2d.dx
         self.cover_all = conv2d.cover_all
         self.W_dtype = W_node.dtype
+        self.ideep_hint = conv2d.ideep_hint
 
     def forward_cpu(self, inputs):
+        if self.ideep_hint is not None:
+            return self.forward_ideep(inputs)
+
         self.retain_inputs((0, 1))
         x, gy = inputs
         col = conv.im2col_cpu(
@@ -319,6 +344,17 @@ class Convolution2DGradW(function_node.FunctionNode):
 
         gW = numpy.tensordot(
             gy, col, ((0, 2, 3), (0, 4, 5))).astype(self.W_dtype, copy=False)
+        return gW,
+
+    def forward_ideep(self, inputs):
+        self.retain_inputs((0, 1))
+
+        cc = _ideep.ideep.xnn.ConvolutionBackwardWeights(
+            inputs, stride=(self.sy, self.sx), pad=(self.ph, self.pw),
+            outsize=(self.kh, self.kw), cover_all=self.cover_all,
+            hint=self.ideep_hint)
+        gW, gb = cc.execute_on()
+
         return gW,
 
     def forward_gpu(self, inputs):

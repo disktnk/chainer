@@ -1,6 +1,7 @@
 import numpy
 
 import chainer
+from chainer import _ideep
 from chainer import configuration
 from chainer import cuda
 from chainer import function_node
@@ -45,6 +46,7 @@ def _pair(x):
 class Deconvolution2DFunction(function_node.FunctionNode):
 
     cover_all = None
+    ideep_hint = None
 
     def __init__(self, stride=1, pad=0, outsize=None, **kwargs):
         argument.check_unexpected_kwargs(
@@ -135,14 +137,37 @@ class Deconvolution2DFunction(function_node.FunctionNode):
 
         self._calc_out_size(x, W)
 
-        gcol = numpy.tensordot(W, x, (0, 1)).astype(x.dtype, copy=False)
-        gcol = numpy.rollaxis(gcol, 3)
-        y = conv.col2im_cpu(
-            gcol, self.sy, self.sx, self.ph, self.pw, self.outh, self.outw,
-            dy=self.dy, dx=self.dx)
-        # b, k, h, w
+        if (all(_.dtype == numpy.float32 for _ in inputs)
+                and (self.dy == 1 and self.dx == 1)
+                and _ideep.should_use_ideep('>=auto')):
+
+            # iDeep implementation
+            return self._forward_ideep(x, W, b)
+
+        else:
+            gcol = numpy.tensordot(W, x, (0, 1)).astype(x.dtype, copy=False)
+            gcol = numpy.rollaxis(gcol, 3)
+            y = conv.col2im_cpu(
+                gcol, self.sy, self.sx, self.ph, self.pw, self.outh, self.outw,
+                dy=self.dy, dx=self.dx)
+            # b, k, h, w
+            if b is not None:
+                y += b.reshape(1, b.size, 1, 1)
+            return y,
+
+    def _forward_ideep(self, x, W, b):
+        # bias is not supported yet
+        cc = _ideep.ideep.xnn.ConvolutionBackwardData(
+            (x, W), stride=(self.sy, self.sx),
+            pad=(self.ph, self.pw), outsize=(self.outh, self.outw),
+            cover_all=self.cover_all)
+
+        self.ideep_hint = cc.hint
+        y, = cc.execute_on()
+
         if b is not None:
             y += b.reshape(1, b.size, 1, 1)
+
         return y,
 
     def forward_gpu(self, inputs):

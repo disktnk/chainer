@@ -5,6 +5,7 @@ import threading
 
 import numpy
 
+import chainer
 from chainer import cuda
 
 
@@ -97,8 +98,7 @@ def _get_type(name, index, array, accept_none):
         # case that gradient is not given
         return Variable(TypeInfo((), None), var)
 
-    assert(isinstance(array, numpy.ndarray) or
-           isinstance(array, cuda.ndarray))
+    assert isinstance(array, chainer.get_array_types())
     return Variable(TypeInfo(array.shape, array.dtype), var)
 
 
