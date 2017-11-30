@@ -64,10 +64,11 @@ class ReLU(function_node.FunctionNode):
     def backward(self, indexes, grad_outputs):
         gy, = grad_outputs
         y, = self.get_retained_outputs()
-        if self._ideep_hint is not None:
-            # iDeep implementation
-            x, = self.get_retained_inputs()
-            return ReLUGradIdeep(x, y, self._ideep_hint).apply((gy,))
+        # if self._ideep_hint is not None:
+        #     # iDeep implementation
+        #     x, = self.get_retained_inputs()
+        #     print(type(x))
+        #     return ReLUGradIdeep(x, y, self._ideep_hint).apply((gy,))
         if chainer.should_use_cudnn('==always') and self._use_cudnn:
             # cuDNN implementatioin
             x, = self.get_retained_inputs()
@@ -101,7 +102,10 @@ class ReLUGrad2(function_node.FunctionNode):
         self.b = b.data
 
     def forward_cpu(self, inputs):
-        y = (self.b > 0) * inputs[0]
+        if _ideep.is_available() and isinstance(self.b, _ideep.ideep.mdarray):
+            y = numpy.greater(self.b, 0).astype(self.b.dtype) * inputs[0]
+        else:
+            y = (self.b > 0) * inputs[0]
         return utils.force_array(y, dtype=y.dtype),
 
     def forward_gpu(self, inputs):
